@@ -943,7 +943,10 @@ private:
             }
             else
                 cmd += command->params.asString();
-            command->result = gattParsePrimary(shellExec(cmd));
+            //command->result = gattParsePrimary(shellExec(cmd));
+            asyncShellExec(m_ios, cmd, boost::bind(&This::onAsyncExecGattParsePrimary,
+                shared_from_this(), _1, _2, _3, command));
+            return false; // pended
         }
         else if (boost::iequals(command->name, "gatt/characteristics"))
         {
@@ -955,7 +958,10 @@ private:
             }
             else
                 cmd += command->params.asString();
-            command->result = gattParseCharacteristics(shellExec(cmd));
+            //command->result = gattParseCharacteristics(shellExec(cmd));
+            asyncShellExec(m_ios, cmd, boost::bind(&This::onAsyncExecGattParseCharacteristics,
+                shared_from_this(), _1, _2, _3, command));
+            return false; // pended
         }
         else if (boost::iequals(command->name, "gatt/charRead")
               || boost::iequals(command->name, "gatt/readChar")
@@ -970,7 +976,10 @@ private:
             }
             else
                 cmd += command->params.asString();
-            command->result = gattParseCharRead(shellExec(cmd));
+            //command->result = gattParseCharRead(shellExec(cmd));
+            asyncShellExec(m_ios, cmd, boost::bind(&This::onAsyncExecGattParseCharRead,
+                shared_from_this(), _1, _2, _3, command));
+            return false; // pended
         }
         else if (boost::iequals(command->name, "gatt/charWrite")
               || boost::iequals(command->name, "gatt/writeChar")
@@ -987,7 +996,10 @@ private:
             }
             else
                 cmd += command->params.asString();
-            command->result = gattParseCharWrite(shellExec(cmd));
+            //command->result = gattParseCharWrite(shellExec(cmd));
+            asyncShellExec(m_ios, cmd, boost::bind(&This::onAsyncExecGattParseCharWrite,
+                shared_from_this(), _1, _2, _3, command));
+            return false; // pended
         }
         else
             throw std::runtime_error("Unknown command");
@@ -1367,7 +1379,153 @@ private:
         if (m_service && m_device)
             m_service->asyncUpdateCommand(m_device, command);
     }
+    
+    json::Value parsePrimary(const String& response)
+    {
+        json::Value result(json::Value::TYPE_ARRAY);
+        String s(response);
+        char* cur;
+        cur = strtok(const_cast<char*>(s.c_str()), "\n");
+        while (cur)
+        {   
+            int start = 0, end = 0;
+            char uuid[64];
+            uuid[0] = 0;
 
+            // "attr handle = 0x000c, end grp handle = 0x000f uuid: 00001801-0000-1000-8000-00805f9b34fb"
+            if (sscanf(cur, "attr handle = 0x%4X, end grp handle = 0x%4X uuid: %63s", &start, &end, uuid) == 3)
+            {
+                json::Value item;
+                item["startingHandle"] = dump::hex(UInt16(start));
+                item["endingHandle"] = dump::hex(UInt16(end));
+                item["UUID"] = boost::trim_copy(String(uuid));
+
+                result.append(item);
+            }
+            else
+                throw std::runtime_error("Unexpected response");
+            cur = strtok(NULL, "\n");
+        }
+        return result;
+    }
+    
+    json::Value parseCharacteristics(const String& response)
+    {
+        json::Value result(json::Value::TYPE_ARRAY);
+        String s(response);
+        char* cur;
+        cur = strtok(const_cast<char*>(s.c_str()), "\n");
+        while (cur)
+        {   
+            int handle = 0, properties = 0, value_handle = 0;
+            char uuid[64];
+            uuid[0] = 0;
+
+            // "handle = 0x0002, char properties = 0x02, char value handle = 0x0003, uuid = 00002a00-0000-1000-8000-00805f9b34fb"
+            if (sscanf(cur, "handle = 0x%4X, char properties = 0x%2X, char value handle = 0x%4X, uuid = %63s", &handle, &properties, &value_handle, uuid) == 4)
+            {
+                json::Value item;
+                item["handle"] = dump::hex(UInt16(handle));
+                item["properties"] = dump::hex(UInt16(properties));
+                item["valueHandle"] = dump::hex(UInt16(value_handle));
+                item["UUID"] = boost::trim_copy(String(uuid));
+
+                result.append(item);
+            }
+            else
+                throw std::runtime_error("Unexpected response");
+            cur = strtok(NULL, "\n");
+        }
+        return result;
+    }
+
+    json::Value parseCharRead(const String& response)
+    {
+        //Characteristic value/descriptor: 00 18
+        const String signature = "Characteristic value/descriptor:";
+        if (!boost::starts_with(response, signature))
+            throw std::runtime_error("Unexpected response");
+
+        int respValue = atoi(response.substr(signature.length()).c_str());
+        json::Value res;
+        res["hex"] = dump::hex(UInt8(respValue));
+        return res;
+    }
+
+    json::Value parseCharWrite(const String& response)
+    {
+        if (!boost::iequals(response, "Characteristic value was written successfully"))
+            throw std::runtime_error("Unexpected response");
+
+        return json::Value::null();
+    }
+    
+    template<typename ResponseHandler>
+    void parseResponse(
+        boost::system::error_code err,
+        int result,
+        const String &output,
+        devicehive::CommandPtr command,
+        ResponseHandler rh)
+    {
+        HIVELOG_DEBUG(m_log, "async_result: " << err << ", result:" << result << ", output:" << output);
+
+        if (err)
+        {
+            command->status = "Failed";
+            command->result = String(err.message());
+        }
+        else if (result != 0)
+        {
+            command->status = "Failed";
+            command->result = result;
+        }
+        else
+        {
+            command->status = "Success";
+            command->result = rh(output);
+        }
+
+        if (m_service && m_device)
+            m_service->asyncUpdateCommand(m_device, command);
+    }
+    
+    void onAsyncExecGattParsePrimary(
+        boost::system::error_code err,
+        int result,
+        const String& output,
+        devicehive::CommandPtr command)
+    {
+        parseResponse(err, result, output, command, boost::bind(&This::parsePrimary, shared_from_this(), _1));
+    }
+    
+    void onAsyncExecGattParseCharacteristics(
+        boost::system::error_code err,
+        int result,
+        const String& output,
+        devicehive::CommandPtr command)
+    {
+        parseResponse(err, result, output, command, boost::bind(&This::parseCharacteristics, shared_from_this(), _1));
+    }
+    
+    void onAsyncExecGattParseCharRead(
+        boost::system::error_code err,
+        int result,
+        const String& output,
+        devicehive::CommandPtr command)
+    {
+        parseResponse(err, result, output, command, boost::bind(&This::parseCharRead, shared_from_this(), _1));
+    }
+    
+    void onAsyncExecGattParseCharWrite(
+        boost::system::error_code err,
+        int result,
+        const String& output,
+        devicehive::CommandPtr command)
+    {
+        parseResponse(err, result, output, command, boost::bind(&This::parseCharWrite, shared_from_this(), _1));
+    }
+    
 private:
 
     /// @brief Send all pending notifications.

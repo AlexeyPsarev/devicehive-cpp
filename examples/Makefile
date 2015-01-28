@@ -72,7 +72,7 @@ zigbee_gw: ${home_path}/zigbee_gw.cpp ${home_path}/zigbee_gw.hpp
 
 btle_gw: ${home_path}/btle_gw.cpp ${home_path}/btle_gw.hpp
 	${CROSS_COMPILE}${CXX} -o btle_gw ${home_path}/btle_gw.cpp ${CXXFLAGS} ${LDFLAGS} \
-		${ex_libs}/libboost_system.a -lbluetooth
+		${ex_libs}/libboost_system.a -lbluetooth -lboost_thread-mt
 	${CROSS_COMPILE}strip btle_gw
 
 #########################################################
